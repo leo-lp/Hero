@@ -28,6 +28,7 @@ public class HeroContext {
   internal var snapshotViews = [UIView: UIView]()
   internal var viewAlphas = [UIView: CGFloat]()
   internal var targetStates = [UIView: HeroTargetState]()
+  internal var superviewToNoSnapshotSubviewMap: [UIView: [(Int, UIView)]] = [:]
 
   internal var defaultCoordinateSpace: HeroCoordinateSpace = .local
 
@@ -44,6 +45,7 @@ public class HeroContext {
 
   internal func process(views: [UIView], idMap: inout [String: UIView]) {
     for view in views {
+      view.layer.removeAllAnimations()
       if container.convert(view.bounds, from: view).intersects(container.bounds) {
         if let heroID = view.heroID {
           idMap[heroID] = view
@@ -144,6 +146,10 @@ extension HeroContext {
     case .layerRender:
       snapshot = view.slowSnapshotView()
     case .noSnapshot:
+      if superviewToNoSnapshotSubviewMap[view.superview!] == nil {
+        superviewToNoSnapshotSubviewMap[view.superview!] = []
+      }
+      superviewToNoSnapshotSubviewMap[view.superview!]!.append((view.superview!.subviews.index(of: view)!, view))
       snapshot = view
     case .optimized:
       #if os(tvOS)
@@ -175,6 +181,9 @@ extension HeroContext {
 
           newBarView.addSubview(realSnapshot)
           snapshot = newBarView
+        } else if let effectView = view as? UIVisualEffectView {
+          snapshot = UIVisualEffectView(effect: effectView.effect)
+          snapshot.frame = effectView.bounds
         } else {
           snapshot = view.snapshotView(afterScreenUpdates: true)!
         }
@@ -187,36 +196,38 @@ extension HeroContext {
       }
     #endif
 
-    if snapshotType != .noSnapshot {
-      snapshot.layer.allowsGroupOpacity = false
-    }
-
     view.layer.cornerRadius = oldCornerRadius
     view.alpha = oldAlpha
 
-    if !(view is UINavigationBar), let contentView = snapshot.subviews.get(0) {
-      // the Snapshot's contentView must have hold the cornerRadius value,
-      // since the snapshot might not have maskToBounds set
-      contentView.layer.cornerRadius = view.layer.cornerRadius
-      contentView.layer.masksToBounds = true
-    }
+    if snapshotType != .noSnapshot {
+      snapshot.layer.allowsGroupOpacity = false
 
-    snapshot.layer.cornerRadius = view.layer.cornerRadius
-    snapshot.layer.zPosition = view.layer.zPosition
-    snapshot.layer.opacity = view.layer.opacity
-    snapshot.layer.isOpaque = view.layer.isOpaque
-    snapshot.layer.anchorPoint = view.layer.anchorPoint
-    snapshot.layer.masksToBounds = view.layer.masksToBounds
-    snapshot.layer.borderColor = view.layer.borderColor
-    snapshot.layer.borderWidth = view.layer.borderWidth
-    snapshot.layer.transform = view.layer.transform
+      if !(view is UINavigationBar), let contentView = snapshot.subviews.get(0) {
+        // the Snapshot's contentView must have hold the cornerRadius value,
+        // since the snapshot might not have maskToBounds set
+        contentView.layer.cornerRadius = view.layer.cornerRadius
+        contentView.layer.masksToBounds = true
+      }
 
-    if self[view]?.displayShadow ?? true {
-      snapshot.layer.shadowRadius = view.layer.shadowRadius
-      snapshot.layer.shadowOpacity = view.layer.shadowOpacity
-      snapshot.layer.shadowColor = view.layer.shadowColor
-      snapshot.layer.shadowOffset = view.layer.shadowOffset
-      snapshot.layer.shadowPath = view.layer.shadowPath
+      snapshot.layer.cornerRadius = view.layer.cornerRadius
+      snapshot.layer.zPosition = view.layer.zPosition
+      snapshot.layer.opacity = view.layer.opacity
+      snapshot.layer.isOpaque = view.layer.isOpaque
+      snapshot.layer.anchorPoint = view.layer.anchorPoint
+      snapshot.layer.masksToBounds = view.layer.masksToBounds
+      snapshot.layer.borderColor = view.layer.borderColor
+      snapshot.layer.borderWidth = view.layer.borderWidth
+      snapshot.layer.transform = view.layer.transform
+      snapshot.layer.contentsRect = view.layer.contentsRect
+      snapshot.layer.contentsScale = view.layer.contentsScale
+
+      if self[view]?.displayShadow ?? true {
+        snapshot.layer.shadowRadius = view.layer.shadowRadius
+        snapshot.layer.shadowOpacity = view.layer.shadowOpacity
+        snapshot.layer.shadowColor = view.layer.shadowColor
+        snapshot.layer.shadowOffset = view.layer.shadowOffset
+        snapshot.layer.shadowPath = view.layer.shadowPath
+      }
     }
 
     snapshot.frame = containerView.convert(view.bounds, from: view)
@@ -260,19 +271,34 @@ extension HeroContext {
       targetStates[view] = newValue
     }
   }
+
+  public func clean() {
+    for (superview, subviews) in superviewToNoSnapshotSubviewMap {
+      for (index, view) in subviews.reversed() {
+        superview.insertSubview(view, at: index)
+      }
+    }
+  }
 }
 
 // internal
 extension HeroContext {
   public func hide(view: UIView) {
     if viewAlphas[view] == nil, self[view]?.snapshotType != .noSnapshot {
-      viewAlphas[view] = view.isOpaque ? .infinity : view.alpha
-      view.alpha = 0
+      if view is UIVisualEffectView {
+        view.isHidden = true
+        viewAlphas[view] = 1
+      } else {
+        viewAlphas[view] = view.isOpaque ? .infinity : view.alpha
+        view.alpha = 0
+      }
     }
   }
   public func unhide(view: UIView) {
     if let oldAlpha = viewAlphas[view] {
-      if oldAlpha == .infinity {
+      if view is UIVisualEffectView {
+        view.isHidden = false
+      } else if oldAlpha == .infinity {
         view.alpha = 1
         view.isOpaque = true
       } else {
@@ -295,8 +321,11 @@ extension HeroContext {
   }
 
   internal func removeAllSnapshots() {
-    for snapshot in snapshotViews.values {
-      snapshot.removeFromSuperview()
+    for (view, snapshot) in snapshotViews {
+      if view != snapshot {
+        // do not remove when it is using .useNoSnapshot
+        snapshot.removeFromSuperview()
+      }
     }
   }
   internal func removeSnapshots(rootView: UIView) {
